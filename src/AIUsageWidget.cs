@@ -8,6 +8,7 @@
 //
 // 데이터 출처 (모두 이 PC 안의 파일만 읽음, 인터넷 접속·로그인 토큰 사용 없음)
 //   Claude 사용률 : %APPDATA%\UsageWidget\statusline\<세션ID>.json  (상태표시줄 명령이 저장)
+//                   상태표시줄은 터미널 Claude Code(CLI)에서만 실행된다. 데스크탑앱 세션은 값을 남기지 않는다.
 //   Codex 사용률  : ~/.codex/sessions/**/rollout-*.jsonl 의 마지막 rate_limits
 //   오늘 토큰     : ~/.claude/projects/**/*.jsonl, ~/.codex/sessions/**/rollout-*.jsonl
 
@@ -32,8 +33,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("AI 사용량 위젯")]
 [assembly: AssemblyDescription("Claude·Codex 사용률을 트레이에서 확인하는 위젯")]
 [assembly: AssemblyProduct("AI Usage Widget")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace AIUsageWidget
 {
@@ -309,7 +310,7 @@ namespace AIUsageWidget
             }
             r.SnapshotAt = snap5 == null ? snapW : snapW == null ? snap5 : (snap5 > snapW ? snap5 : snapW);
             r.Ok = r.FiveHour != null || r.Week != null;
-            if (!r.Ok) r.Error = "Claude를 한 번 사용하면 표시됩니다";
+            if (!r.Ok) r.Error = "터미널에서 Claude Code를 쓰면 표시됩니다";
             return r;
         }
 
@@ -344,39 +345,55 @@ namespace AIUsageWidget
         {
             var r = new LimitResult();
             if (!Directory.Exists(Paths.CodexDir)) { r.Error = "Codex 미설치"; return r; }
-            var files = CodexRecentFiles(14).OrderByDescending(f => f.LastWriteTime).Take(5).ToList();
-            if (files.Count == 0) { r.Error = "최근 14일 Codex 사용 기록 없음"; return r; }
+            var all = CodexRecentFiles(14);
+            if (all.Count == 0) { r.Error = "최근 14일 Codex 사용 기록 없음"; return r; }
+            // Codex는 기록 파일을 열어 둔 채로 쓰기 때문에 Windows가 수정 시각을 늦게 갱신한다.
+            // 수정 시각 최신 5개와 이름(세션 시작 시각) 최신 5개를 모두 보고, 기록 시각이 가장 늦은 값을 쓴다.
+            var files = all.OrderByDescending(f => f.LastWriteTime).Take(5)
+                .Concat(all.OrderByDescending(f => f.Name, StringComparer.Ordinal).Take(5))
+                .GroupBy(f => f.FullName).Select(g => g.First());
+            LimitResult best = null;
             foreach (var f in files)
             {
-                string[] lines;
-                try { lines = Util.ReadShared(f.FullName, 2 * 1024 * 1024).Split('\n'); } catch { continue; }
-                for (int i = lines.Length - 1; i >= 0; i--)
-                {
-                    string ln = lines[i];
-                    if (!(ln.Contains("\"token_count\"") && ln.Contains("\"used_percent\""))) continue;
-                    object j;
-                    try { j = Json.Parse(ln); } catch { continue; }
-                    object rl = Json.Get(j, "payload", "rate_limits");
-                    if (rl == null) continue;
-                    string lid = Json.Str(Json.Get(rl, "limit_id"));
-                    if (!string.IsNullOrEmpty(lid) && lid != "codex") continue;
-                    foreach (var key in new[] { "primary", "secondary" })
-                    {
-                        object w = Json.Get(rl, key);
-                        if (w == null) continue;
-                        double? pct = Json.Num(Json.Get(w, "used_percent"));
-                        DateTime? rst = Util.EpochToLocal(Json.Get(w, "resets_at"));
-                        if (Json.Long(Json.Get(w, "window_minutes")) <= 360) { r.FiveHour = pct; r.FiveReset = rst; }
-                        else { r.Week = pct; r.WeekReset = rst; }
-                    }
-                    r.Plan = Json.Str(Json.Get(rl, "plan_type")) ?? "";
-                    r.SnapshotAt = Util.IsoToLocal(Json.Get(j, "timestamp"));
-                    r.Ok = r.FiveHour != null || r.Week != null;
-                    if (r.Ok) return r;
-                }
+                var c = LastCodexLimit(f.FullName);
+                if (c != null && (best == null || c.SnapshotAt > best.SnapshotAt)) best = c;
             }
+            if (best != null) return best;
             r.Error = "로그에 사용률 기록 없음";
             return r;
+        }
+
+        // 기록 파일의 마지막 사용률 기록 (없으면 null)
+        static LimitResult LastCodexLimit(string path)
+        {
+            string[] lines;
+            try { lines = Util.ReadShared(path, 2 * 1024 * 1024).Split('\n'); } catch { return null; }
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                string ln = lines[i];
+                if (!(ln.Contains("\"token_count\"") && ln.Contains("\"used_percent\""))) continue;
+                object j;
+                try { j = Json.Parse(ln); } catch { continue; }
+                object rl = Json.Get(j, "payload", "rate_limits");
+                if (rl == null) continue;
+                string lid = Json.Str(Json.Get(rl, "limit_id"));
+                if (!string.IsNullOrEmpty(lid) && lid != "codex") continue;
+                var r = new LimitResult();
+                foreach (var key in new[] { "primary", "secondary" })
+                {
+                    object w = Json.Get(rl, key);
+                    if (w == null) continue;
+                    double? pct = Json.Num(Json.Get(w, "used_percent"));
+                    DateTime? rst = Util.EpochToLocal(Json.Get(w, "resets_at"));
+                    if (Json.Long(Json.Get(w, "window_minutes")) <= 360) { r.FiveHour = pct; r.FiveReset = rst; }
+                    else { r.Week = pct; r.WeekReset = rst; }
+                }
+                r.Plan = Json.Str(Json.Get(rl, "plan_type")) ?? "";
+                r.SnapshotAt = Util.IsoToLocal(Json.Get(j, "timestamp"));
+                r.Ok = r.FiveHour != null || r.Week != null;
+                if (r.Ok && r.SnapshotAt != null) return r;
+            }
+            return null;
         }
 
         // 지난번 읽은 위치 이후에 추가된 완성된 줄만 돌려준다
@@ -419,10 +436,11 @@ namespace AIUsageWidget
             {
                 foreach (var f in new DirectoryInfo(proj).EnumerateFiles("*.jsonl", SearchOption.AllDirectories))
                 {
-                    if (f.LastWriteTime < tokDay) continue;
+                    // 열린 채로 쓰이는 파일은 수정 시각·크기가 늦게 갱신되므로 하루 여유를 두고,
+                    // 새 내용 여부는 ReadNewLines가 파일을 직접 열어 실제 크기로 판단한다
+                    if (f.LastWriteTime < tokDay.AddDays(-1)) continue;
                     FileState st;
                     if (!claudeFiles.TryGetValue(f.FullName, out st)) { st = new FileState(); claudeFiles[f.FullName] = st; }
-                    if (f.Length == st.Pos) continue;
                     List<string> lines;
                     try { lines = ReadNewLines(f.FullName, st); } catch { continue; }
                     foreach (var ln in lines)
@@ -463,10 +481,10 @@ namespace AIUsageWidget
             ResetIfNewDay();
             foreach (var f in CodexRecentFiles(7))
             {
-                if (f.LastWriteTime < tokDay) continue;
+                // Codex는 기록 파일을 열어 둔 채로 쓰므로 수정 시각·크기를 믿지 않고 최근 7일 파일을 모두 확인한다
+                // (처음 한 번만 전체를 읽고, 이후에는 늘어난 부분만 읽는다)
                 FileState st;
                 if (!codexFiles.TryGetValue(f.FullName, out st)) { st = new FileState(); codexFiles[f.FullName] = st; }
-                if (f.Length == st.Pos) continue;
                 List<string> lines;
                 try { lines = ReadNewLines(f.FullName, st); } catch { continue; }
                 foreach (var ln in lines)
@@ -901,7 +919,8 @@ namespace AIUsageWidget
             bool x5s = Stale(codex, codex.FiveReset), xws = Stale(codex, codex.WeekReset);
 
             if (claude.Error != "") { lblClaudeStat.Text = claude.Error; lblClaudeStat.ForeColor = CWarn; }
-            else { lblClaudeStat.Text = "마지막 사용 " + claude.SnapshotAt.Value.ToString("M'/'d HH:mm", Util.Ko) + " 기준"; lblClaudeStat.ForeColor = CSub; }
+            // 데스크탑앱은 상태표시줄을 실행하지 않아 터미널 Claude Code가 마지막으로 받은 값이다
+            else { lblClaudeStat.Text = "터미널 Claude · 마지막 사용 " + claude.SnapshotAt.Value.ToString("M'/'d HH:mm", Util.Ko) + " 기준"; lblClaudeStat.ForeColor = CSub; }
             SetRow(rowClaude5, claude.FiveHour, claude.FiveReset, c5s);
             SetRow(rowClaudeW, claude.Week, claude.WeekReset, cws);
 
