@@ -33,8 +33,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("AI 사용량 위젯")]
 [assembly: AssemblyDescription("Claude·Codex 사용률을 트레이에서 확인하는 위젯")]
 [assembly: AssemblyProduct("AI Usage Widget")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
 
 namespace AIUsageWidget
 {
@@ -539,10 +539,25 @@ namespace AIUsageWidget
 
         public static bool IsConfigured() { return CurrentCommand() == OurCommand(); }
 
+        // 명령 문자열 맨 앞의 "따옴표로 감싼 exe 경로"
+        static string ExeFromCommand(string cmd)
+        {
+            var m = Regex.Match(cmd ?? "", "^\\s*\"([^\"]+)\"");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        // 다른 위치의 위젯이 연동되어 있고 그 exe가 아직 있으면 복사본을 실행한 것이다
+        static bool OtherCopyExists(string cmd)
+        {
+            string exe = ExeFromCommand(cmd);
+            return exe != null && !string.Equals(exe, Paths.ExePath, StringComparison.OrdinalIgnoreCase) && File.Exists(exe);
+        }
+
+        // 연동된 exe가 지워진 경우(= 옮긴 경우)에만 true. 복사본을 실행했을 때는 연동을 가져오지 않는다.
         public static bool IsOursButMoved()
         {
             string cmd = CurrentCommand();
-            return IsOurs(cmd) && cmd != OurCommand();
+            return IsOurs(cmd) && cmd != OurCommand() && !OtherCopyExists(cmd);
         }
 
         // interactive=false 는 점검용 (묻지 않고 진행)
@@ -573,6 +588,13 @@ namespace AIUsageWidget
                       "위젯 연동으로 바꿀까요? 기존 상태표시줄은 더 이상 표시되지 않습니다.\n(원본은 같은 폴더에 백업합니다)";
                 if (MessageBox.Show(msg, "AI 사용량 - Claude 연동", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                     return "Claude 연동을 건너뛰었습니다.";
+            }
+            else if (interactive && OtherCopyExists(cmd))
+            {
+                string msg = "다른 위치의 위젯과 이미 연동되어 있습니다.\n\n현재: " + ExeFromCommand(cmd) + "\n이 파일: " + Paths.ExePath +
+                    "\n\n이 파일로 연동을 바꿀까요?\n(바꾼 뒤 예전 위치의 파일을 지워도 됩니다)";
+                if (MessageBox.Show(msg, "AI 사용량 - Claude 연동", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                    return "기존 연동을 그대로 두었습니다.";
             }
 
             if (original != null)
@@ -605,7 +627,8 @@ namespace AIUsageWidget
                 if (k == null) return;
                 var v = k.GetValue(RunName) as string;
                 string want = "\"" + Paths.ExePath + "\"";
-                if (v != null && v != want) k.SetValue(RunName, want);
+                // 등록된 exe가 지워진 경우에만 고친다 (복사본을 실행했을 때는 건드리지 않음)
+                if (v != null && v != want && !OtherCopyExists(v)) k.SetValue(RunName, want);
             }
         }
     }
@@ -648,7 +671,7 @@ namespace AIUsageWidget
             BuildMenu();
             LoadSettings();
             try { Setup.FixAutoStartPath(); } catch { }
-            // 이미 연동했는데 실행 파일을 옮긴 경우에만 묻지 않고 경로를 고친다
+            // 이미 연동했는데 실행 파일을 옮긴 경우(예전 exe가 없음)에만 묻지 않고 경로를 고친다
             try { if (Setup.IsOursButMoved()) Setup.ConfigureClaude(Paths.ClaudeSettings, false); } catch { }
 
             SetTrayIcon(null);
