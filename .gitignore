@@ -1,0 +1,7 @@
+# 빌드 결과 (Releases에 올림)
+dist/
+*.zip
+src/app.ico
+
+# 로컬에서 풀어 본 배포본
+AIUsageWidget/
